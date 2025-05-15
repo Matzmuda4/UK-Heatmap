@@ -8,7 +8,7 @@ import os
 st.set_page_config(layout="wide")
 st.title("UK Dentist Clinics & Customer Appointments Heatmaps")
 
-# ─── 1) Dentist clinics ────────────────────────────────────────────────────────
+# 1) Dentist clinics
 dentist_file = "dentist_data_map.csv"
 if os.path.exists(dentist_file):
     df_dent = pd.read_csv(dentist_file)
@@ -27,15 +27,14 @@ heat_dent = [
 ]
 HeatMap(heat_dent, radius=15, max_zoom=13).add_to(map_dent)
 
-# ─── 2) Customer appointments ─────────────────────────────────────────────────
-cust_file = "customers_with_latlon.csv"
+# Customer appointments 
+cust_file = "customers_with_latlon_cleaned.csv"
 if os.path.exists(cust_file):
     df_cust = pd.read_csv(cust_file, low_memory=False)
 else:
     st.error(f"Could not find `{cust_file}` in the project folder.")
     st.stop()
 
-# --- hard-code your date column name here ---
 date_col = "assigned_date"
 
 # parse it into datetime
