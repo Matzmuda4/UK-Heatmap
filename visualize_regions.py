@@ -46,11 +46,13 @@ def create_popup_content(region_data):
     return f"""
     <div style='min-width: 200px'>
         <h4>Region {region_data['region_id']}</h4>
-        <b>Clinics:</b> {', '.join(map(str, clinic_ids))}
+        <b>Number of clinics:</b> {len(clinic_ids)}
+        <br>
+        <b>Clinic IDs:</b> {', '.join(map(str, clinic_ids))}
         <br>
         <b>Total availability:</b> {region_data['total_availability_hours']:.1f} h/week
         <br>
-        <b>Number of clinics:</b> {len(clinic_ids)}
+        <b>Hours per clinic:</b> {region_data['total_availability_hours']/len(clinic_ids):.1f} h/week
     </div>
     """
 
@@ -86,7 +88,7 @@ def main():
         color = colormap(row['total_availability_hours'])
         
         # Create tooltip with basic info
-        tooltip = f"Region {row['region_id']}: {row['total_availability_hours']:.1f} h/week"
+        tooltip = f"Region {row['region_id']}: {row['n_clinics']} clinics, {row['total_availability_hours']:.1f} h/week"
         
         # Add region to map
         folium.GeoJson(
@@ -106,7 +108,7 @@ def main():
     
     # Display summary statistics
     st.subheader("Summary Statistics")
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.metric("Total Regions", len(regions_gdf))
@@ -114,6 +116,13 @@ def main():
         st.metric("Total Weekly Hours", f"{regions_gdf['total_availability_hours'].sum():.1f}")
     with col3:
         st.metric("Total Clinics", regions_gdf['n_clinics'].sum())
+    with col4:
+        st.metric("Max Clinics per Region", regions_gdf['n_clinics'].max())
+    
+    # Display distribution of clinics per region
+    st.subheader("Distribution of Clinics per Region")
+    clinic_dist = regions_gdf['n_clinics'].value_counts().sort_index()
+    st.bar_chart(clinic_dist)
     
     # Display detailed region data
     st.subheader("Region Details")

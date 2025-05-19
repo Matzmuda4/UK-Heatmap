@@ -7,6 +7,7 @@ from shapely.ops import unary_union
 import json
 from typing import Dict, List, Tuple
 from shapely.geometry import MultiPolygon
+from itertools import combinations
 
 def calculate_grid_boundaries(lat: float, lon: float, distance_km: float) -> Dict[str, float]:
     """Calculate the boundaries of a grid square centered on a point."""
@@ -171,12 +172,12 @@ def find_overlapping_regions(grids_gdf):
                 if current_geom.intersects(other_geom):
                     intersection = current_geom.intersection(other_geom)
                     if not intersection.is_empty and intersection.area > 0:
-                        overlapping.append((other_id, other_hours, intersection))
+                        overlapping.append((j, other_id, other_hours, other_geom))
         
         # Process the base geometry (non-overlapping part)
         if not current_geom.is_empty:
             # Remove overlapping parts
-            for _, _, overlap_geom in overlapping:
+            for _, _, _, overlap_geom in overlapping:
                 current_geom = current_geom.difference(overlap_geom)
             
             if not current_geom.is_empty:
@@ -189,22 +190,38 @@ def find_overlapping_regions(grids_gdf):
                 region_id += 1
         
         # Process overlapping regions
-        for j, (other_id, other_hours, intersection) in enumerate(overlapping):
-            current_intersection = intersection
+        if overlapping:
+            # Create a list of all possible combinations of overlapping grids
+            from itertools import combinations
             
-            # Remove any parts that have been processed
-            for processed_geom in processed_geometries:
-                if current_intersection.intersects(processed_geom):
-                    current_intersection = current_intersection.difference(processed_geom)
-            
-            if not current_intersection.is_empty:
-                regions.append({
-                    'region_id': region_id,
-                    'clinic_ids': sorted([base_id, other_id]),
-                    'total_availability_hours': base_hours + other_hours,
-                    'geometry': current_intersection
-                })
-                region_id += 1
+            # Start with pairs and go up to all possible combinations
+            for n in range(2, len(overlapping) + 2):  # Start from 2 (base + 1 other) up to all grids
+                for combo in combinations(overlapping, n-1):
+                    # Get the intersection of all geometries in this combination
+                    intersection_geom = base_geom
+                    total_hours = base_hours
+                    clinic_ids = [base_id]
+                    
+                    for _, other_id, other_hours, other_geom in combo:
+                        intersection_geom = intersection_geom.intersection(other_geom)
+                        total_hours += other_hours
+                        clinic_ids.append(other_id)
+                    
+                    if not intersection_geom.is_empty and intersection_geom.area > 0:
+                        # Remove any parts that have been processed
+                        current_intersection = intersection_geom
+                        for processed_geom in processed_geometries:
+                            if current_intersection.intersects(processed_geom):
+                                current_intersection = current_intersection.difference(processed_geom)
+                        
+                        if not current_intersection.is_empty:
+                            regions.append({
+                                'region_id': region_id,
+                                'clinic_ids': sorted(clinic_ids),
+                                'total_availability_hours': total_hours,
+                                'geometry': current_intersection
+                            })
+                            region_id += 1
         
         # Add the processed geometries to the set
         processed_geometries.add(base_geom)
