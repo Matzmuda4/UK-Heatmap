@@ -3,6 +3,7 @@ import geopandas as gpd
 from shapely.geometry import box, Point
 import numpy as np
 from math import sqrt
+import argparse
 
 def km_to_deg(km):
     """
@@ -42,6 +43,10 @@ def create_square_grid(lat, lon, radius_km):
     return box(minx, miny, maxx, maxy)
 
 def main():
+    parser = argparse.ArgumentParser(description='Generate clinic grids')
+    parser.add_argument('--grid_size', type=float, default=20, help='Grid size in kilometers (radius)')
+    args = parser.parse_args()
+    
     # Read the sample clinics data
     clinics_df = pd.read_csv('sample_clinics.csv')
     
@@ -55,7 +60,7 @@ def main():
         grid = create_square_grid(
             lat=row['latitude'],
             lon=row['longitude'],
-            radius_km=20  # 20km radius as requested
+            radius_km=args.grid_size
         )
         
         grid_data = {
