@@ -17,7 +17,7 @@ def load_data():
         regions_gdf = gpd.read_file('regions.geojson')
         
         # Load customer data
-        customers_df = pd.read_csv('customers_with_latlon_cleaned.csv')
+        customers_df = pd.read_csv('customers_with_latlon_cleaned.csv', low_memory=False)
         customers_df['assigned_date'] = pd.to_datetime(customers_df['assigned_date'])
         
         return regions_gdf, customers_df

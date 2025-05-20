@@ -4,6 +4,10 @@ from shapely.geometry import box, Point
 import numpy as np
 from math import sqrt
 import argparse
+from sklearn.cluster import DBSCAN
+from shapely.ops import unary_union
+from typing import List, Dict, Tuple
+import json
 
 def km_to_deg(km):
     """
@@ -42,9 +46,55 @@ def create_square_grid(lat, lon, radius_km):
     # Create a square polygon
     return box(minx, miny, maxx, maxy)
 
+def merge_nearby_squares(grids: List[Dict], distance_km: float) -> List[Dict]:
+    """
+    Merge grid squares that are within a certain distance of each other.
+    Uses DBSCAN clustering on centroids with a distance threshold.
+    """
+    # Convert the distance threshold from km to degrees (approx. 1 deg ~ 111 km)
+    eps_deg = distance_km / 111.0
+
+    # Extract centroids and create array for DBSCAN
+    centroids = np.array([
+        [grid['geometry'].centroid.x, grid['geometry'].centroid.y]
+        for grid in grids
+    ])
+
+    # Apply DBSCAN clustering
+    clustering = DBSCAN(eps=eps_deg, min_samples=1).fit(centroids)
+    
+    merged_grids = []
+    for cluster_id in np.unique(clustering.labels_):
+        # Get indices of grids in this cluster
+        indices = np.where(clustering.labels_ == cluster_id)[0]
+        
+        # Get all grids in this cluster
+        cluster_grids = [grids[i] for i in indices]
+        
+        # Merge geometries using unary_union
+        merged_geom = unary_union([grid['geometry'] for grid in cluster_grids])
+        
+        # Sum up weekly hours
+        total_hours = sum(grid['weekly_hours'] for grid in cluster_grids)
+        
+        # Collect all clinic IDs
+        clinic_ids = [grid['clinic_id'] for grid in cluster_grids]
+        
+        # Create merged grid
+        merged_grid = {
+            'clinic_id': clinic_ids[0] if len(clinic_ids) == 1 else min(clinic_ids),  # Use first/min ID as primary
+            'all_clinic_ids': clinic_ids,  # Keep track of all merged clinic IDs
+            'weekly_hours': total_hours,
+            'geometry': merged_geom
+        }
+        merged_grids.append(merged_grid)
+    
+    return merged_grids
+
 def main():
     parser = argparse.ArgumentParser(description='Generate clinic grids')
     parser.add_argument('--grid_size', type=float, default=20, help='Grid size in kilometers (radius)')
+    parser.add_argument('--merge_distance', type=float, default=5, help='Distance in kilometers for merging nearby grids')
     args = parser.parse_args()
     
     # Read the sample clinics data
@@ -70,25 +120,47 @@ def main():
         }
         grids.append(grid_data)
     
-    # Create a GeoDataFrame of all grids
-    grids_gdf = gpd.GeoDataFrame(grids, crs="EPSG:4326")
+    print(f"Created {len(grids)} initial grids")
     
-    # Save the grids to GeoJSON and CSV for visualization and further processing
+    # Merge nearby grids
+    merged_grids = merge_nearby_squares(grids, args.merge_distance)
+    print(f"Merged into {len(merged_grids)} grids")
+    
+    # Create two versions of the data: one for GeoJSON (without all_clinic_ids) and one for CSV
+    geojson_grids = []
+    csv_grids = []
+    
+    for grid in merged_grids:
+        # Version for GeoJSON (without all_clinic_ids)
+        geojson_grid = {
+            'clinic_id': grid['clinic_id'],
+            'weekly_hours': grid['weekly_hours'],
+            'geometry': grid['geometry']
+        }
+        geojson_grids.append(geojson_grid)
+        
+        # Version for CSV (with all_clinic_ids as JSON string)
+        csv_grid = {
+            'clinic_id': grid['clinic_id'],
+            'all_clinic_ids': json.dumps(grid['all_clinic_ids']),
+            'weekly_hours': grid['weekly_hours']
+        }
+        csv_grids.append(csv_grid)
+    
+    # Create and save GeoJSON version
+    grids_gdf = gpd.GeoDataFrame(geojson_grids, crs="EPSG:4326")
     grids_gdf.to_file('clinic_grids.geojson', driver='GeoJSON')
     
-    # Save a CSV version without the geometry for easier processing
-    grids_df = pd.DataFrame({
-        'clinic_id': grids_gdf['clinic_id'],
-        'weekly_hours': grids_gdf['weekly_hours']
-    })
+    # Save CSV version
+    grids_df = pd.DataFrame(csv_grids)
     grids_df.to_csv('clinic_grids.csv', index=False)
     
     # Print summary statistics
-    print(f"Generated {len(grids_gdf)} grids")
+    print(f"\nGrid generation complete:")
     print(f"Total weekly hours: {grids_gdf['weekly_hours'].sum():.1f}")
-    print("\nGrid generation complete. Files saved:")
+    print("\nFiles saved:")
     print("- clinic_grids.geojson: Contains the grid geometries")
-    print("- clinic_grids.csv: Contains the clinic data without geometries")
+    print("- clinic_grids.csv: Contains the clinic data with merged IDs")
 
 if __name__ == "__main__":
     main() 

@@ -34,14 +34,20 @@ def create_color_scale(max_hours):
         caption='Weekly Availability Hours'
     )
 
+def parse_clinic_ids(clinic_ids_str):
+    """Safely parse clinic IDs from string."""
+    try:
+        if pd.isna(clinic_ids_str):
+            return []
+        clinic_ids = json.loads(str(clinic_ids_str))
+        return clinic_ids if isinstance(clinic_ids, list) else [clinic_ids]
+    except (json.JSONDecodeError, TypeError):
+        return []
+
 def create_popup_content(region_data):
     """Create HTML content for region popup."""
-    try:
-        clinic_ids = json.loads(str(region_data['clinic_ids']))
-        if not isinstance(clinic_ids, list):
-            clinic_ids = [clinic_ids]
-    except (json.JSONDecodeError, TypeError):
-        clinic_ids = []
+    clinic_ids = parse_clinic_ids(region_data['clinic_ids'])
+    hours_per_clinic = region_data['total_availability_hours']/len(clinic_ids) if len(clinic_ids) > 0 else 0
     
     return f"""
     <div style='min-width: 200px'>
@@ -52,7 +58,7 @@ def create_popup_content(region_data):
         <br>
         <b>Total availability:</b> {region_data['total_availability_hours']:.1f} h/week
         <br>
-        <b>Hours per clinic:</b> {region_data['total_availability_hours']/len(clinic_ids):.1f} h/week
+        <b>Hours per clinic:</b> {hours_per_clinic:.1f} h/week
     </div>
     """
 
@@ -62,10 +68,15 @@ def main():
     # Load data
     regions_gdf = load_data()
     
-    # Add number of clinics column
+    # Add number of clinics column and collect all unique clinic IDs
+    all_clinic_ids = set()
     regions_gdf['n_clinics'] = regions_gdf['clinic_ids'].apply(
-        lambda x: len(json.loads(str(x))) if pd.notnull(x) else 0
+        lambda x: len(parse_clinic_ids(x))
     )
+    
+    # Get unique clinic IDs across all regions
+    for clinic_ids in regions_gdf['clinic_ids']:
+        all_clinic_ids.update(parse_clinic_ids(clinic_ids))
     
     # Calculate max hours for color scale
     max_hours = regions_gdf['total_availability_hours'].max()
@@ -115,7 +126,7 @@ def main():
     with col2:
         st.metric("Total Weekly Hours", f"{regions_gdf['total_availability_hours'].sum():.1f}")
     with col3:
-        st.metric("Total Clinics", regions_gdf['n_clinics'].sum())
+        st.metric("Total Unique Clinics", len(all_clinic_ids))
     with col4:
         st.metric("Max Clinics per Region", regions_gdf['n_clinics'].max())
     

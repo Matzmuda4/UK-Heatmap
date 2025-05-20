@@ -1,1 +1,7 @@
 venv/
+SmilewhiteHeatmap/regions.geojson
+SmilewhiteHeatmap/region_metrics.geojson
+SmilewhiteHeatmap/sample_clinics.csv
+SmilewhiteHeatmap/service_gaps.csv
+SmilewhiteHeatmap/regions.csv
+SmilewhiteHeatmap/clinic_grids.csv
