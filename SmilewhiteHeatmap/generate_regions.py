@@ -144,14 +144,15 @@ def find_overlapping_regions(grids_gdf):
     region_id = 1
     
     # Create a list of all grid polygons with their clinic IDs and hours
-    grid_list = [(row.geometry, row.clinic_id, row.weekly_hours) for idx, row in grids_gdf.iterrows()]
+    grid_list = [(row.geometry, row.clinic_id, row.weekly_hours, json.loads(row.all_clinic_ids) if hasattr(row, 'all_clinic_ids') else [row.clinic_id]) 
+                 for idx, row in grids_gdf.iterrows()]
     n_grids = len(grid_list)
     
     # Process each grid
     processed_geometries = set()
     
     for i in range(n_grids):
-        base_geom, base_id, base_hours = grid_list[i]
+        base_geom, base_id, base_hours, base_all_ids = grid_list[i]
         
         # Start with the base grid's geometry
         current_geom = base_geom
@@ -168,22 +169,22 @@ def find_overlapping_regions(grids_gdf):
         overlapping = []
         for j in range(n_grids):
             if i != j:
-                other_geom, other_id, other_hours = grid_list[j]
+                other_geom, other_id, other_hours, other_all_ids = grid_list[j]
                 if current_geom.intersects(other_geom):
                     intersection = current_geom.intersection(other_geom)
                     if not intersection.is_empty and intersection.area > 0:
-                        overlapping.append((j, other_id, other_hours, other_geom))
+                        overlapping.append((j, other_id, other_hours, other_geom, other_all_ids))
         
         # Process the base geometry (non-overlapping part)
         if not current_geom.is_empty:
             # Remove overlapping parts
-            for _, _, _, overlap_geom in overlapping:
+            for _, _, _, overlap_geom, _ in overlapping:
                 current_geom = current_geom.difference(overlap_geom)
             
             if not current_geom.is_empty:
                 regions.append({
                     'region_id': region_id,
-                    'clinic_ids': [base_id],
+                    'clinic_ids': base_all_ids,
                     'total_availability_hours': base_hours,
                     'geometry': current_geom
                 })
@@ -192,20 +193,17 @@ def find_overlapping_regions(grids_gdf):
         # Process overlapping regions
         if overlapping:
             # Create a list of all possible combinations of overlapping grids
-            from itertools import combinations
-            
-            # Start with pairs and go up to all possible combinations
             for n in range(2, len(overlapping) + 2):  # Start from 2 (base + 1 other) up to all grids
                 for combo in combinations(overlapping, n-1):
                     # Get the intersection of all geometries in this combination
                     intersection_geom = base_geom
                     total_hours = base_hours
-                    clinic_ids = [base_id]
+                    all_clinic_ids = base_all_ids.copy()  # Start with base clinic IDs
                     
-                    for _, other_id, other_hours, other_geom in combo:
+                    for _, other_id, other_hours, other_geom, other_all_ids in combo:
                         intersection_geom = intersection_geom.intersection(other_geom)
                         total_hours += other_hours
-                        clinic_ids.append(other_id)
+                        all_clinic_ids.extend(other_all_ids)  # Add all clinic IDs from other grid
                     
                     if not intersection_geom.is_empty and intersection_geom.area > 0:
                         # Remove any parts that have been processed
@@ -217,7 +215,7 @@ def find_overlapping_regions(grids_gdf):
                         if not current_intersection.is_empty:
                             regions.append({
                                 'region_id': region_id,
-                                'clinic_ids': sorted(clinic_ids),
+                                'clinic_ids': sorted(list(set(all_clinic_ids))),  # Remove duplicates and sort
                                 'total_availability_hours': total_hours,
                                 'geometry': current_intersection
                             })
@@ -229,51 +227,12 @@ def find_overlapping_regions(grids_gdf):
     return regions
 
 def main():
-    # Parameters
-    GRID_SIZE_KM = 30  # Size of grid squares (can be adjusted)
-    
-    # Load clinic data
-    clinics_df = pd.read_csv('sample_clinics.csv')
-    print(f"Loaded {len(clinics_df)} clinics")
-    
-    # Create grids for each clinic
-    grids_with_metadata = []
-    for _, row in clinics_df.iterrows():
-        grid, metadata = create_clinic_grid(row, GRID_SIZE_KM)
-        grids_with_metadata.append((grid, metadata))
-    
-    print("Created clinic grids")
-    
-    # Find all unique regions
-    regions = find_all_regions(grids_with_metadata)
-    print(f"Found {len(regions)} unique regions")
-    
-    # Create regions GeoDataFrame
-    regions_gdf = gpd.GeoDataFrame({
-        'geometry': [region['geometry'] for region in regions],
-        'clinic_ids': [json.dumps([int(cid) for cid in region['clinic_ids']]) for region in regions],
-        'total_availability_hours': [float(region['total_availability']) for region in regions]
-    }, crs="EPSG:4326")
-    
-    # Add region_id
-    regions_gdf['region_id'] = [f'R{i+1}' for i in range(len(regions_gdf))]
-    
-    # Save to GeoJSON
-    regions_gdf.to_file('regions.geojson', driver='GeoJSON')
-    print("Saved regions to regions.geojson")
-    
-    # Also save a CSV version for easier reading
-    regions_df = pd.DataFrame({
-        'region_id': regions_gdf['region_id'],
-        'clinic_ids': regions_gdf['clinic_ids'],
-        'total_availability_hours': regions_gdf['total_availability_hours'],
-        'geometry': regions_gdf['geometry'].apply(lambda x: x.wkt)
-    })
-    regions_df.to_csv('regions.csv', index=False)
-    print("Saved regions to regions.csv")
-
-    # Load the clinic grids
+    # Load the clinic grids from both GeoJSON and CSV
     grids_gdf = gpd.read_file('clinic_grids.geojson')
+    grids_csv = pd.read_csv('clinic_grids.csv')
+    
+    # Add the all_clinic_ids from CSV to the GeoDataFrame
+    grids_gdf['all_clinic_ids'] = grids_csv['all_clinic_ids']
     
     # Find all unique regions
     regions = find_overlapping_regions(grids_gdf)
@@ -285,9 +244,12 @@ def main():
     regions_gdf['clinic_ids'] = regions_gdf['clinic_ids'].apply(json.dumps)
     
     # Save the regions to GeoJSON and CSV
-    regions_gdf.to_file('regions.geojson', driver='GeoJSON')
+    # For GeoJSON, create a version without the clinic_ids array
+    geojson_regions = regions_gdf.copy()
+    geojson_regions['clinic_ids'] = geojson_regions['clinic_ids'].apply(lambda x: json.loads(x)[0])  # Just use first ID
+    geojson_regions.to_file('regions.geojson', driver='GeoJSON')
     
-    # Save a CSV version
+    # Save full version to CSV
     regions_df = pd.DataFrame({
         'region_id': regions_gdf['region_id'],
         'clinic_ids': regions_gdf['clinic_ids'],
@@ -306,5 +268,5 @@ def main():
         count = (overlap_counts == n).sum()
         print(f"Regions with {n} clinic{'s' if n > 1 else ''}: {count}")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main() 

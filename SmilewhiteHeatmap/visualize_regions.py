@@ -9,12 +9,22 @@ from datetime import datetime, timedelta
 import numpy as np
 from process_customers import calculate_region_capacity
 from streamlit_folium import folium_static
+from shapely.geometry import Point
 
 def load_data():
     """Load and prepare all necessary data."""
     try:
         # Load base regions (without metrics)
         regions_gdf = gpd.read_file('regions.geojson')
+        regions_df = pd.read_csv('regions.csv')
+        
+        # Ensure clinic_ids are properly loaded from CSV
+        regions_gdf['clinic_ids'] = regions_df['clinic_ids']
+        
+        # Add clinic count
+        regions_gdf['clinic_count'] = regions_gdf['clinic_ids'].apply(
+            lambda x: len(json.loads(x)) if isinstance(x, str) else 1
+        )
         
         # Load customer data
         customers_df = pd.read_csv('customers_with_latlon_cleaned.csv', low_memory=False)
@@ -43,8 +53,78 @@ def create_popup_content(region_data):
             <p style="margin: 5px 0;"><b>Weekly Hours:</b> {region_data['total_availability_hours']:.1f}</p>
             <p style="margin: 5px 0;"><b>Current Customers:</b> {region_data['customer_count']}</p>
             <p style="margin: 5px 0;"><b>Capacity Ratio:</b> {region_data['capacity_ratio']:.2f}</p>
+            <p style="margin: 5px 0;"><b>Number of Clinics:</b> {region_data['clinic_count']}</p>
         </div>
     """
+
+def find_service_gaps(customers_df, regions_gdf, start_date, end_date):
+    """Find customers not served by any region."""
+    # Filter customers for the selected date range
+    mask = (customers_df['assigned_date'].dt.date >= start_date) & (customers_df['assigned_date'].dt.date <= end_date)
+    period_customers = customers_df[mask].copy()
+    
+    # Create points for each customer
+    customer_points = [Point(row['longitude'], row['latitude']) for _, row in period_customers.iterrows()]
+    
+    # Check each customer against all regions
+    gaps = []
+    for i, (point, row) in enumerate(zip(customer_points, period_customers.iterrows())):
+        is_in_region = False
+        for _, region in regions_gdf.iterrows():
+            if region.geometry.contains(point):
+                is_in_region = True
+                break
+        if not is_in_region:
+            gaps.append(row[1])  # row[1] contains the actual data
+    
+    if gaps:
+        return pd.DataFrame(gaps)
+    return pd.DataFrame()
+
+def calculate_metrics(regions_gdf, customers_df, start_date, end_date):
+    """Calculate metrics for regions including customer counts and capacity ratios."""
+    # Filter customers for the selected date range and group by customer ID
+    mask = (customers_df['assigned_date'].dt.date >= start_date) & (customers_df['assigned_date'].dt.date <= end_date)
+    period_customers = customers_df[mask].copy()
+    
+    # Group by customer ID to avoid counting the same customer multiple times
+    period_customers = period_customers.drop_duplicates(subset=['customer_id'])
+    
+    # Create a copy of regions_gdf for metrics
+    metrics_gdf = regions_gdf.copy()
+    
+    # Initialize customer counts
+    metrics_gdf['customer_count'] = 0
+    
+    # Count unique customers per region
+    for idx, region in metrics_gdf.iterrows():
+        region_poly = region.geometry
+        region_customers = period_customers[period_customers.apply(
+            lambda row: region_poly.contains(Point(row['longitude'], row['latitude'])), axis=1
+        )]
+        metrics_gdf.at[idx, 'customer_count'] = len(region_customers)
+    
+    # Calculate capacity ratio (customers per hour)
+    metrics_gdf['capacity_ratio'] = metrics_gdf['customer_count'] / metrics_gdf['total_availability_hours']
+    metrics_gdf['capacity_ratio'] = metrics_gdf['capacity_ratio'].fillna(0)
+    
+    # Determine status based on capacity ratio
+    def get_status(ratio):
+        if ratio == 0:
+            return "No customers"
+        elif ratio < 0.5:
+            return "Under capacity"
+        elif ratio < 1:
+            return "Optimal capacity"
+        else:
+            return "Over capacity"
+    
+    metrics_gdf['status'] = metrics_gdf['capacity_ratio'].apply(get_status)
+    
+    # Find service gaps
+    gaps_df = find_service_gaps(customers_df, regions_gdf, start_date, end_date)
+    
+    return metrics_gdf, gaps_df
 
 def main():
     st.set_page_config(layout="wide", page_title="UK Dental Capacity Map")
@@ -54,29 +134,29 @@ def main():
     if 'date_selected' not in st.session_state:
         st.session_state.date_selected = False
     
-    # Load data
-    regions_gdf, customers_df = load_data()
-    if regions_gdf is None or customers_df is None:
-        st.error("Failed to load data. Please check if the data files exist.")
+    # Load data for date range selection
+    try:
+        customers_df = pd.read_csv('customers_with_latlon_cleaned.csv', low_memory=False)
+        customers_df['assigned_date'] = pd.to_datetime(customers_df['assigned_date'])
+        min_date = customers_df['assigned_date'].dt.date.min()
+        max_date = customers_df['assigned_date'].dt.date.max()
+    except Exception:
+        st.error("Error loading customer data. Please check if the file exists.")
         return
     
     # Date range selection in sidebar
     st.sidebar.header("Date Selection")
     
-    # Get min and max dates from data
-    min_date = customers_df['assigned_date'].min()
-    max_date = customers_df['assigned_date'].max()
-    
     # Date input fields
     start_date = st.sidebar.date_input(
         "Start Date",
-        min_date.date(),
-        min_value=min_date.date(),
-        max_value=max_date.date()
+        min_date,
+        min_value=min_date,
+        max_value=max_date
     )
     
     # Ensure end_date is at most 7 days after start_date
-    max_end_date = min(max_date.date(), start_date + timedelta(days=6))
+    max_end_date = min(max_date, start_date + timedelta(days=6))
     end_date = st.sidebar.date_input(
         "End Date",
         max_end_date,
@@ -97,12 +177,17 @@ def main():
     
     # Show loading message
     with st.spinner("Calculating metrics and generating visualization..."):
-        # Calculate region metrics and gaps for selected date range
-        metrics_gdf, gaps_df = calculate_region_capacity(
+        # Load data
+        regions_gdf, customers_df = load_data()
+        if regions_gdf is None or customers_df is None:
+            return
+        
+        # Calculate metrics for the selected date range
+        metrics_gdf, gaps_df = calculate_metrics(
             regions_gdf,
             customers_df,
-            pd.Timestamp(st.session_state.start_date),
-            pd.Timestamp(st.session_state.end_date)
+            st.session_state.start_date,
+            st.session_state.end_date
         )
         
         # Create map
@@ -119,7 +204,7 @@ def main():
             # Determine fill color based on capacity ratio
             fill_color = color_scale(row['capacity_ratio']) if row['capacity_ratio'] != float('inf') else 'gray'
             
-            # Add region to map
+            # Add region to map with both popup and tooltip
             folium.GeoJson(
                 row.geometry,
                 style_function=lambda x, color=fill_color: {
@@ -128,7 +213,8 @@ def main():
                     'weight': 1,
                     'fillOpacity': 0.7
                 },
-                popup=folium.Popup(popup_content, max_width=300)
+                popup=folium.Popup(popup_content, max_width=300),
+                tooltip=f"Region {row['region_id']} - {row['status']}"
             ).add_to(m)
         
         # Add gap points as a heatmap
@@ -176,18 +262,16 @@ def main():
         
         # Display region data table
         st.write("### Region Capacity Details")
-        # Create a copy of the metrics dataframe for display
-        display_df = metrics_gdf.drop(columns=['geometry']).copy()
         
-        # Select only the columns we want to display
+        # Select columns to display
         columns_to_display = ['region_id', 'total_availability_hours', 'customer_count', 
-                            'capacity_ratio', 'status']
-        display_df = display_df[columns_to_display].copy()
+                            'capacity_ratio', 'status', 'clinic_count']
+        display_df = metrics_gdf[columns_to_display].copy()
         
         # Sort by capacity ratio
         display_df = display_df.sort_values('capacity_ratio', ascending=False)
         
-        # Format the numeric columns
+        # Format numeric columns
         display_df['total_availability_hours'] = display_df['total_availability_hours'].round(1)
         display_df['capacity_ratio'] = display_df['capacity_ratio'].round(2)
         
