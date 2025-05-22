@@ -193,9 +193,6 @@ def find_overlapping_regions(grids_gdf):
         # Process overlapping regions
         if overlapping:
             # Create a list of all possible combinations of overlapping grids
-            from itertools import combinations
-            
-            # Start with pairs and go up to all possible combinations
             for n in range(2, len(overlapping) + 2):  # Start from 2 (base + 1 other) up to all grids
                 for combo in combinations(overlapping, n-1):
                     # Get the intersection of all geometries in this combination

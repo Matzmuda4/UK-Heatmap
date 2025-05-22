@@ -1,31 +1,30 @@
 import streamlit as st
 import subprocess
 import os
-import time
 import pandas as pd
-
-def run_command(command):
-    """Run a command and return its output."""
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        shell=True
-    )
-    stdout, stderr = process.communicate()
-    return stdout.decode(), stderr.decode()
 
 def get_active_clinic_count(input_file='dentist_data_map_random_hours.csv'):
     """Get the number of active clinics from the input file."""
     try:
-        # Look for the file in the parent directory
-        parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        file_path = os.path.join(parent_dir, input_file)
-        df = pd.read_csv(file_path)
+        df = pd.read_csv(input_file)
         return len(df[df['active'] == 1])
     except Exception as e:
         st.error(f"Error reading clinic data: {e}")
         return 30  # Default fallback value
+
+def run_command(command):
+    """Run a command and return its output."""
+    try:
+        process = subprocess.run(
+            command,
+            shell=True,
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        return process.stdout, process.stderr
+    except subprocess.CalledProcessError as e:
+        return None, str(e)
 
 def main():
     st.title("UK Dental Regions Pipeline")
@@ -34,24 +33,17 @@ def main():
     total_active_clinics = get_active_clinic_count()
     
     # Sidebar controls
-    st.sidebar.header("Pipeline Controls")
+    st.sidebar.header("Pipeline Configuration")
     
     # Clinic selection
-    clinic_selection = st.sidebar.radio(
-        "Clinic Selection",
-        ["All Active Clinics", "Sample Clinics"],
-        help=f"Choose whether to use all active clinics ({total_active_clinics} available) or a sample"
+    n_clinics = st.sidebar.slider(
+        "Number of Clinics",
+        min_value=10,
+        max_value=total_active_clinics,
+        value=min(50, total_active_clinics),
+        step=10,
+        help=f"Number of clinics to sample (max {total_active_clinics} active clinics)"
     )
-    
-    if clinic_selection == "Sample Clinics":
-        n_clinics = st.sidebar.slider(
-            "Number of Clinics",
-            min_value=10,
-            max_value=min(total_active_clinics, 500),  # Cap at either total active or 500
-            value=min(30, total_active_clinics),  # Default to 30 or max available
-            step=10,
-            help=f"Number of clinics to randomly sample (max {total_active_clinics} available)"
-        )
     
     # Grid parameters
     grid_size = st.sidebar.slider(
@@ -65,7 +57,7 @@ def main():
     
     merge_distance = st.sidebar.slider(
         "Merge Distance (km)",
-        min_value=1,
+        min_value=0,
         max_value=20,
         value=5,
         step=1,
@@ -78,11 +70,7 @@ def main():
         
         # Step 1: Select/Downsample clinics
         progress_placeholder.write("Step 1: Preparing clinic data...")
-        if clinic_selection == "Sample Clinics":
-            cmd = f"python downsample_clinics.py --n_clinics {n_clinics}"
-        else:
-            cmd = "python downsample_clinics.py"  # No n_clinics means use all active clinics
-        stdout, stderr = run_command(cmd)
+        stdout, stderr = run_command(f"python downsample_clinics.py --n_clinics {n_clinics}")
         if stderr:
             st.error(f"Error in downsample_clinics.py: {stderr}")
             return
@@ -90,8 +78,7 @@ def main():
         
         # Step 2: Generate and merge grids
         progress_placeholder.write("Step 2: Generating and merging grids...")
-        cmd = f"python generate_grids.py --grid_size {grid_size} --merge_distance {merge_distance}"
-        stdout, stderr = run_command(cmd)
+        stdout, stderr = run_command(f"python generate_grids.py --grid_size {grid_size} --merge_distance {merge_distance}")
         if stderr:
             st.error(f"Error in generate_grids.py: {stderr}")
             return
@@ -99,8 +86,7 @@ def main():
         
         # Step 3: Generate regions
         progress_placeholder.write("Step 3: Generating regions...")
-        cmd = "python generate_regions.py"
-        stdout, stderr = run_command(cmd)
+        stdout, stderr = run_command("python generate_regions.py")
         if stderr:
             st.error(f"Error in generate_regions.py: {stderr}")
             return
@@ -111,11 +97,7 @@ def main():
         st.success("Pipeline completed successfully! Launching visualization...")
         
         # Run the visualization in a new process
-        cmd = "streamlit run visualize_regions.py"
-        subprocess.Popen(cmd, shell=True)
-        
-        # Give some time for the visualization to start
-        time.sleep(2)
+        subprocess.Popen("streamlit run visualize_regions.py", shell=True)
         
         # Clear the progress placeholder
         progress_placeholder.empty()

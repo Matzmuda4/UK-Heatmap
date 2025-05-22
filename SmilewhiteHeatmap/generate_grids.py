@@ -51,6 +51,9 @@ def merge_nearby_squares(grids: List[Dict], distance_km: float) -> List[Dict]:
     Merge grid squares that are within a certain distance of each other.
     Uses DBSCAN clustering on centroids with a distance threshold.
     """
+    if distance_km <= 0:
+        return grids
+
     # Convert the distance threshold from km to degrees (approx. 1 deg ~ 111 km)
     eps_deg = distance_km / 111.0
 
@@ -82,7 +85,7 @@ def merge_nearby_squares(grids: List[Dict], distance_km: float) -> List[Dict]:
         
         # Create merged grid
         merged_grid = {
-            'clinic_id': clinic_ids[0] if len(clinic_ids) == 1 else min(clinic_ids),  # Use first/min ID as primary
+            'clinic_id': clinic_ids[0],  # Use first clinic ID as primary
             'all_clinic_ids': clinic_ids,  # Keep track of all merged clinic IDs
             'weekly_hours': total_hours,
             'geometry': merged_geom
@@ -122,7 +125,7 @@ def main():
     
     print(f"Created {len(grids)} initial grids")
     
-    # Merge nearby grids
+    # Merge nearby grids if merge_distance > 0
     merged_grids = merge_nearby_squares(grids, args.merge_distance)
     print(f"Merged into {len(merged_grids)} grids")
     
