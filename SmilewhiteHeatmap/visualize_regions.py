@@ -108,16 +108,22 @@ def calculate_metrics(regions_gdf, customers_df, start_date, end_date):
     metrics_gdf['capacity_ratio'] = metrics_gdf['customer_count'] / metrics_gdf['total_availability_hours']
     metrics_gdf['capacity_ratio'] = metrics_gdf['capacity_ratio'].fillna(0)
     
-    # Determine status based on capacity ratio
+    # Determine status based on capacity ratio with new thresholds
     def get_status(ratio):
         if ratio == 0:
-            return "No customers"
-        elif ratio < 0.5:
-            return "Under capacity"
-        elif ratio < 1:
-            return "Optimal capacity"
+            return "Empty"
+        elif ratio < 0.25:
+            return "Partially Empty"
+        elif ratio <= 0.5:
+            return "moderately Full"
+        elif ratio <= 0.75:
+            return "Partially Full"
+        elif ratio <= 0.85:
+            return "Nearly Full"
+        elif ratio <= 1:
+            return "At Capacity"
         else:
-            return "Over capacity"
+            return "Overcrowded"
     
     metrics_gdf['status'] = metrics_gdf['capacity_ratio'].apply(get_status)
     
