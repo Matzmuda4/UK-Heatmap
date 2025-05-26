@@ -2,7 +2,7 @@ import pandas as pd
 import geopandas as gpd
 from shapely.geometry import box, Point
 import numpy as np
-from math import sqrt
+from math import sqrt, radians, cos, sin, asin
 import argparse
 from sklearn.cluster import DBSCAN
 from shapely.ops import unary_union
@@ -22,9 +22,41 @@ def km_to_deg(km):
         'lon': km / (111.0 * np.cos(np.radians(54)))  # degrees longitude per km at UK latitude
     }
 
+def haversine_distance(lon1, lat1, lon2, lat2):
+    """Calculate the great circle distance between two points in kilometers."""
+    lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    c = 2 * asin(sqrt(a))
+    r = 6371  # Radius of earth in kilometers
+    return c * r
+
+def point_in_dynamic_area(point_lon, point_lat, area):
+    """Check if a point falls within a dynamic area's square."""
+    # Convert radius to degrees for the square
+    deg = km_to_deg(area['radius_km'])
+    
+    # Calculate square boundaries
+    min_lon = area['center'][0] - deg['lon']
+    max_lon = area['center'][0] + deg['lon']
+    min_lat = area['center'][1] - deg['lat']
+    max_lat = area['center'][1] + deg['lat']
+    
+    # Check if point is within square
+    return (min_lon <= point_lon <= max_lon) and (min_lat <= point_lat <= max_lat)
+
+def get_grid_size_for_location(lon, lat, config):
+    """Determine the appropriate grid size for a given location based on dynamic areas."""
+    for area in config['dynamic_areas']:
+        if point_in_dynamic_area(lon, lat, area):
+            return config['dynamic_sizes'][area['name']]
+    return config['base_grid_size']
+
 def create_square_grid(lat, lon, radius_km):
     """
     Create a square grid centered at the given lat/lon with sides of 2*radius_km.
+    The area of the grid will be proportional to the square of the radius.
     
     Args:
         lat (float): Latitude of the center point
@@ -94,39 +126,63 @@ def merge_nearby_squares(grids: List[Dict], distance_km: float) -> List[Dict]:
     
     return merged_grids
 
+def create_grids_batch(clinics_df, config):
+    """Create grids for a batch of clinics efficiently."""
+    grids = []
+    
+    # Pre-calculate degrees for each unique grid size
+    grid_sizes = {config['base_grid_size']: km_to_deg(config['base_grid_size'])}
+    for size in set(config['dynamic_sizes'].values()):
+        grid_sizes[size] = km_to_deg(size)
+    
+    # Process all clinics
+    for _, row in clinics_df.iterrows():
+        # Determine grid size based on location
+        grid_size = get_grid_size_for_location(row['longitude'], row['latitude'], config)
+        deg = grid_sizes[grid_size]
+        
+        # Calculate grid boundaries
+        minx = row['longitude'] - deg['lon']
+        maxx = row['longitude'] + deg['lon']
+        miny = row['latitude'] - deg['lat']
+        maxy = row['latitude'] + deg['lat']
+        
+        # Create grid
+        grid = box(minx, miny, maxx, maxy)
+        
+        # Scale weekly hours based on grid size ratio (area ratio)
+        area_ratio = (grid_size / config['base_grid_size']) ** 2
+        scaled_hours = row['weekly_availability_hours'] * area_ratio
+        
+        grids.append({
+            'clinic_id': row['id'],
+            'weekly_hours': scaled_hours,
+            'geometry': grid,
+            'grid_size': grid_size  # Store the grid size for reference
+        })
+    
+    return grids
+
 def main():
     parser = argparse.ArgumentParser(description='Generate clinic grids')
-    parser.add_argument('--grid_size', type=float, default=20, help='Grid size in kilometers (radius)')
-    parser.add_argument('--merge_distance', type=float, default=5, help='Distance in kilometers for merging nearby grids')
+    parser.add_argument('--config', type=str, required=True, help='Path to grid configuration JSON file')
     args = parser.parse_args()
+    
+    # Load configuration
+    with open(args.config, 'r') as f:
+        config = json.load(f)
     
     # Read the sample clinics data
     clinics_df = pd.read_csv('sample_clinics.csv')
     
-    # Create a GeoDataFrame with clinic points
-    geometry = [Point(xy) for xy in zip(clinics_df['longitude'], clinics_df['latitude'])]
-    clinics_gdf = gpd.GeoDataFrame(clinics_df, geometry=geometry, crs="EPSG:4326")
-    
-    # Create grids for each clinic
-    grids = []
-    for idx, row in clinics_gdf.iterrows():
-        grid = create_square_grid(
-            lat=row['latitude'],
-            lon=row['longitude'],
-            radius_km=args.grid_size
-        )
-        
-        grid_data = {
-            'clinic_id': row['id'],
-            'weekly_hours': row['weekly_availability_hours'],
-            'geometry': grid
-        }
-        grids.append(grid_data)
-    
+    # Create grids efficiently
+    print("Creating grids...")
+    grids = create_grids_batch(clinics_df, config)
     print(f"Created {len(grids)} initial grids")
     
     # Merge nearby grids if merge_distance > 0
-    merged_grids = merge_nearby_squares(grids, args.merge_distance)
+    print("Merging grids...")
+    merged_grids = merge_nearby_squares(grids, config['merge_distance'])
     print(f"Merged into {len(merged_grids)} grids")
     
     # Create two versions of the data: one for GeoJSON (without all_clinic_ids) and one for CSV
@@ -145,7 +201,7 @@ def main():
         # Version for CSV (with all_clinic_ids as JSON string)
         csv_grid = {
             'clinic_id': grid['clinic_id'],
-            'all_clinic_ids': json.dumps(grid['all_clinic_ids']),
+            'all_clinic_ids': json.dumps(grid.get('all_clinic_ids', [grid['clinic_id']])),
             'weekly_hours': grid['weekly_hours']
         }
         csv_grids.append(csv_grid)

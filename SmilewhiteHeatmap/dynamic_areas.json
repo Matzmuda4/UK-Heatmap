@@ -1,0 +1,22 @@
+{
+  "dynamic_areas": [
+    {
+      "name": "London Central",
+      "center": [-0.1276, 51.5074],
+      "radius_km": 30,
+      "description": "Central London and surrounding areas"
+    },
+    {
+      "name": "Birmingham Metro",
+      "center": [-1.8904, 52.4862],
+      "radius_km": 40,
+      "description": "Birmingham metropolitan area"
+    },
+    {
+      "name": "Yorkshire Dales",
+      "center": [-2.1592, 54.2322],
+      "radius_km": 50,
+      "description": "Rural Yorkshire Dales region"
+    }
+  ]
+} 

@@ -9,7 +9,23 @@ from datetime import datetime, timedelta
 import numpy as np
 from process_customers import calculate_region_capacity
 from streamlit_folium import folium_static
-from shapely.geometry import Point
+from shapely.geometry import Point, Polygon, box
+from math import radians, cos, sin, asin, sqrt
+import os
+import sys
+
+def km_to_deg(km):
+    """
+    Convert kilometers to approximate degrees.
+    This is a rough approximation and varies with latitude.
+    At UK latitudes (around 54°N), 1 degree is approximately:
+    - Latitude: 111 km
+    - Longitude: 111 * cos(54°) ≈ 65 km
+    """
+    return {
+        'lat': km / 111.0,  # degrees latitude per km
+        'lon': km / (111.0 * np.cos(np.radians(54)))  # degrees longitude per km at UK latitude
+    }
 
 def load_data():
     """Load and prepare all necessary data."""
@@ -26,14 +42,20 @@ def load_data():
             lambda x: len(json.loads(x)) if isinstance(x, str) else 1
         )
         
-        # Load customer data
-        customers_df = pd.read_csv('customers_with_latlon_cleaned.csv', low_memory=False)
-        customers_df['assigned_date'] = pd.to_datetime(customers_df['assigned_date'])
-        
-        return regions_gdf, customers_df
+        return regions_gdf
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
-        return None, None
+        return None
+
+def load_customers():
+    """Load customer data separately for better performance."""
+    try:
+        customers_df = pd.read_csv('customers_with_latlon_cleaned.csv', low_memory=False)
+        customers_df['assigned_date'] = pd.to_datetime(customers_df['assigned_date'])
+        return customers_df
+    except Exception as e:
+        st.error(f"Error loading customer data: {str(e)}")
+        return None
 
 def create_color_scale():
     """Create a color scale for capacity ratios."""
@@ -132,85 +154,110 @@ def calculate_metrics(regions_gdf, customers_df, start_date, end_date):
     
     return metrics_gdf, gaps_df
 
+def haversine_distance(lon1, lat1, lon2, lat2):
+    """Calculate the great circle distance between two points in kilometers."""
+    lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    c = 2 * asin(sqrt(a))
+    r = 6371  # Radius of earth in kilometers
+    return c * r
+
+def load_dynamic_areas():
+    """Load dynamic areas from JSON file."""
+    try:
+        with open('dynamic_areas.json', 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        st.error(f"Error loading dynamic areas: {str(e)}")
+        return {"dynamic_areas": []}
+
+def point_in_dynamic_area(point_lon, point_lat, area):
+    """Check if a point falls within a dynamic area's square."""
+    # Convert radius to degrees for the square
+    deg = km_to_deg(area['radius_km'])
+    
+    # Calculate square boundaries
+    min_lon = area['center'][0] - deg['lon']
+    max_lon = area['center'][0] + deg['lon']
+    min_lat = area['center'][1] - deg['lat']
+    max_lat = area['center'][1] + deg['lat']
+    
+    # Check if point is within square
+    return (min_lon <= point_lon <= max_lon) and (min_lat <= point_lat <= max_lat)
+
 def main():
     st.set_page_config(layout="wide", page_title="UK Dental Capacity Map")
     st.title("UK Dental Capacity Map")
     
-    # Initialize session state for date selection
-    if 'date_selected' not in st.session_state:
-        st.session_state.date_selected = False
+    # Parse command line arguments for dates
+    start_date = None
+    end_date = None
     
-    # Load data for date range selection
-    try:
-        customers_df = pd.read_csv('customers_with_latlon_cleaned.csv', low_memory=False)
-        customers_df['assigned_date'] = pd.to_datetime(customers_df['assigned_date'])
-        min_date = customers_df['assigned_date'].dt.date.min()
-        max_date = customers_df['assigned_date'].dt.date.max()
-    except Exception:
-        st.error("Error loading customer data. Please check if the file exists.")
-        return
+    for i in range(len(sys.argv)):
+        if sys.argv[i] == '--start_date':
+            start_date = datetime.strptime(sys.argv[i+1], '%Y-%m-%d').date()
+        elif sys.argv[i] == '--end_date':
+            end_date = datetime.strptime(sys.argv[i+1], '%Y-%m-%d').date()
     
-    # Date range selection in sidebar
-    st.sidebar.header("Date Selection")
-    
-    # Date input fields
-    start_date = st.sidebar.date_input(
-        "Start Date",
-        min_date,
-        min_value=min_date,
-        max_value=max_date
-    )
-    
-    # Ensure end_date is at most 7 days after start_date
-    max_end_date = min(max_date, start_date + timedelta(days=6))
-    end_date = st.sidebar.date_input(
-        "End Date",
-        max_end_date,
-        min_value=start_date,
-        max_value=max_end_date
-    )
-    
-    # Add a button to trigger visualization
-    if st.sidebar.button("Generate Visualization"):
-        st.session_state.date_selected = True
-        st.session_state.start_date = start_date
-        st.session_state.end_date = end_date
-    
-    # Show instructions if dates haven't been selected
-    if not st.session_state.date_selected:
-        st.info("Please select a date range (maximum 7 days) in the sidebar and click 'Generate Visualization' to view the map.")
+    if start_date is None or end_date is None:
+        st.error("Please provide start and end dates via command line arguments.")
         return
     
     # Show loading message
-    with st.spinner("Calculating metrics and generating visualization..."):
+    with st.spinner("Generating visualization..."):
         # Load data
-        regions_gdf, customers_df = load_data()
-        if regions_gdf is None or customers_df is None:
+        regions_gdf = load_data()
+        if regions_gdf is None:
             return
         
-        # Calculate metrics for the selected date range
+        # Load customer data
+        customers_df = load_customers()
+        if customers_df is None:
+            return
+        
+        # Calculate metrics
         metrics_gdf, gaps_df = calculate_metrics(
             regions_gdf,
             customers_df,
-            st.session_state.start_date,
-            st.session_state.end_date
+            start_date,
+            end_date
         )
         
         # Create map
         m = folium.Map(location=[54.5, -2], zoom_start=6)
         
-        # Add regions with color based on capacity ratio
+        # Add color scale
         color_scale = create_color_scale()
         color_scale.add_to(m)
         
-        for idx, row in metrics_gdf.iterrows():
-            # Create popup content
-            popup_content = create_popup_content(row)
+        # Load and add dynamic areas (squares)
+        dynamic_areas_data = load_dynamic_areas()
+        for area in dynamic_areas_data['dynamic_areas']:
+            deg = km_to_deg(area['radius_km'])
+            bounds = [
+                [area['center'][1] - deg['lat'], area['center'][0] - deg['lon']],
+                [area['center'][1] - deg['lat'], area['center'][0] + deg['lon']],
+                [area['center'][1] + deg['lat'], area['center'][0] + deg['lon']],
+                [area['center'][1] + deg['lat'], area['center'][0] - deg['lon']]
+            ]
             
-            # Determine fill color based on capacity ratio
+            folium.Polygon(
+                locations=bounds,
+                color='purple',
+                weight=2,
+                fill=True,
+                fillColor='purple',
+                fillOpacity=0.1,
+                popup=None
+            ).add_to(m)
+        
+        # Add regions
+        for idx, row in metrics_gdf.iterrows():
+            popup_content = create_popup_content(row)
             fill_color = color_scale(row['capacity_ratio']) if row['capacity_ratio'] != float('inf') else 'gray'
             
-            # Add region to map with both popup and tooltip
             folium.GeoJson(
                 row.geometry,
                 style_function=lambda x, color=fill_color: {
@@ -223,7 +270,7 @@ def main():
                 tooltip=f"Region {row['region_id']} - {row['status']}"
             ).add_to(m)
         
-        # Add gap points as a heatmap
+        # Add gaps heatmap
         if not gaps_df.empty:
             gap_points = gaps_df[['latitude', 'longitude']].values.tolist()
             HeatMap(
@@ -234,15 +281,12 @@ def main():
                 gradient={0.4: 'blue', 0.65: 'lime', 1: 'red'}
             ).add_to(m)
         
-        # Create two columns for the map and legend
+        # Display map and legend
         col1, col2 = st.columns([3, 1])
-        
         with col1:
-            # Display map
             folium_static(m, width=800)
         
         with col2:
-            # Display color scale legend
             st.write("### Map Legend")
             st.write("Capacity Ratio Colors:")
             st.markdown("Green: Low utilization")
@@ -250,10 +294,13 @@ def main():
             st.markdown("Red: High utilization")
             st.markdown("Gray: No availability")
             st.write("---")
+            st.write("Purple Squares:")
+            st.markdown("Dynamic grid size areas")
+            st.write("---")
             st.write("Heatmap (Blue-Green-Red):")
             st.markdown("Shows concentration of service gaps")
         
-        # Display summary statistics
+        # Display statistics and tables
         st.write("### Summary Statistics")
         col1, col2, col3, col4 = st.columns(4)
         
@@ -268,37 +315,20 @@ def main():
         
         # Display region data table
         st.write("### Region Capacity Details")
-        
-        # Select columns to display
         columns_to_display = ['region_id', 'total_availability_hours', 'customer_count', 
                             'capacity_ratio', 'status', 'clinic_count']
         display_df = metrics_gdf[columns_to_display].copy()
-        
-        # Sort by capacity ratio
         display_df = display_df.sort_values('capacity_ratio', ascending=False)
-        
-        # Format numeric columns
         display_df['total_availability_hours'] = display_df['total_availability_hours'].round(1)
         display_df['capacity_ratio'] = display_df['capacity_ratio'].round(2)
-        
         st.dataframe(display_df)
         
-        # Display gaps information
+        # Display gaps and overcrowded regions
         if not gaps_df.empty:
             st.write("### Service Gaps")
             st.write("Areas not serviced by any clinic:")
-            
-            if 'postal_code' in gaps_df.columns:
-                st.write("#### Gaps by Postal Code")
-                gaps_by_postcode = gaps_df.groupby('postal_code').size().reset_index(name='count')
-                gaps_by_postcode = gaps_by_postcode.sort_values('count', ascending=False)
-                st.dataframe(gaps_by_postcode)
-            
-            st.write("#### Detailed Gap Locations")
-            st.dataframe(gaps_df[['latitude', 'longitude', 'assigned_date'] + 
-                               (['postal_code'] if 'postal_code' in gaps_df.columns else [])])
+            st.dataframe(gaps_df[['latitude', 'longitude', 'assigned_date']])
         
-        # Display overcrowded regions
         overcrowded = metrics_gdf[metrics_gdf['capacity_ratio'] > 1]
         if not overcrowded.empty:
             st.write("### Overcrowded Regions")
